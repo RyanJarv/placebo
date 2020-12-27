@@ -170,8 +170,11 @@ class Pill(object):
         expressions for services and operations, however the filtering is done
         in the handler's itself.
         """
-        if self._mode == 'playback':
+        if self._mode != 'record':
             self.stop()
+        else:
+            return
+
         self._mode = 'record'
 
         # You can't register event's with normal globbing, but we can store our original
@@ -181,6 +184,21 @@ class Pill(object):
 
         self._register('record', 'before-call', "*", "*", self._record_params)
         self._register('record', 'after-call', "*", "*", self._record_data)
+
+    def cache(self, services='.*', operations='.*'):
+        if self.mode != 'cache':
+            self.stop()
+        else:
+            return
+
+        self._mode = 'cache'
+
+        self._services = services
+        self._operations = operations
+
+        self._register('cache', 'before-call', '*', '*', self._record_params)
+        self._register('cache', 'before-call', '*', '*', self._mock_request_if_exists)
+        self._register('cache', 'after-call', "*", "*", self._record_data)
 
     def _register(self, mode, event_name, operation, service, function):
         name = '{0}.{1}.{2}'.format(event_name, service.strip(), operation.strip())
@@ -192,12 +210,14 @@ class Pill(object):
             client.meta.events.register(name, function, unique_id)
 
     def playback(self):
-        if self.mode == 'record':
+        if self.mode != 'playback':
             self.stop()
-        if self.mode is None:
-            self._mode = 'playback'
-            self._register('playback', 'before-call', '*', '*', self._record_params)
-            self._register('playback', 'before-call', '*', '*', self._mock_request)
+        else:
+            return
+
+        self._mode = 'playback'
+        self._register('playback', 'before-call', '*', '*', self._record_params)
+        self._register('playback', 'before-call', '*', '*', self._mock_request)
 
     def stop(self):
         LOG.debug('stopping, mode=%s', self.mode)
@@ -223,11 +243,18 @@ class Pill(object):
         LOG.debug('_record_params')
 
     def _record_data(self, http_response, parsed, model, context, **kwargs):
+        # In cache mode this will be set if the response was served from
+        # the cache. We can skip writing it back out in this case.
+        if self.mode == "cache" and context.get("cached"):
+            LOG.debug('_record_data: response was cached, skipping saving to disk')
+            return
+
         LOG.debug('_record_data')
         service_name = model.service_model.endpoint_prefix
         operation_name = model.name
         if not self._registered(service_name, operation_name):
             return
+
         params_hash = context["_pill_params_hash"]
         self.save_response(service_name, operation_name, params_hash,
                            parsed, http_response.status_code)
@@ -318,4 +345,19 @@ class Pill(object):
         operation = model.name
         params_hash = context["_pill_params_hash"]
         LOG.debug('_make_request: %s.%s.%s', service, operation, params_hash)
-        return self.load_response(service, operation, params_hash)
+        resp = self.load_response(service, operation, params_hash)
+
+        # Checked in _record_data to see if we can skip writing out the
+        # response to disk.
+        context["cached"] = True
+        return resp
+
+    def _mock_request_if_exists(self, context, params, **kwargs):
+        """
+        Calls _mock_request and returns the request if found otherwise
+        continues to the next handler, making the real API request.
+        """
+        try:
+            return self._mock_request(context, params, **kwargs)
+        except IOError:
+            LOG.debug('_make_request: cached response not found')

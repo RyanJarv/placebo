@@ -58,6 +58,8 @@ def placebo_session(function):
 
         if os.environ.get('PLACEBO_MODE') == 'record':
             pill.record()
+        elif os.environ.get('PLACEBO_MODE') == 'cache':
+            pill.cache()
         else:
             pill.playback()
 
